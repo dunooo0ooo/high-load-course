@@ -117,6 +117,8 @@ class PaymentExternalSystemAdapterImpl(
 
     override fun name() = properties.accountName
 
+    override fun properties() = properties
+
 }
 
 public fun now() = System.currentTimeMillis()
