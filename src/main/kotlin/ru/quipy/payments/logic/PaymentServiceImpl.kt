@@ -15,15 +15,20 @@ import kotlin.concurrent.withLock
 
 @Service
 class PaymentSystemImpl(
-    private val paymentAccounts: List<PaymentExternalSystemAdapter>
+    private val paymentAccounts: List<PaymentExternalSystemAdapter>,
+    private val paymentMetrics: PaymentMetrics,
 ) : PaymentService {
     companion object {
         val logger = LoggerFactory.getLogger(PaymentSystemImpl::class.java)
     }
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
-        for (account in paymentAccounts) {
-            account.performPaymentAsync(paymentId, amount, paymentStartedAt, deadline)
+        try {
+            for (account in paymentAccounts) {
+                account.performPaymentAsync(paymentId, amount, paymentStartedAt, deadline)
+            }
+        } finally {
+            paymentMetrics.observeRequestDuration(System.currentTimeMillis() - paymentStartedAt)
         }
     }
 }
