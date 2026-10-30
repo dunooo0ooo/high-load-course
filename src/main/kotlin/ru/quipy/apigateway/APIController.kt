@@ -3,14 +3,10 @@ package ru.quipy.apigateway
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.http.HttpHeaders
-import org.springframework.http.HttpStatus
-import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import ru.quipy.orders.repository.OrderRepository
 import ru.quipy.payments.logic.OrderPayer
 import java.util.*
-import java.util.concurrent.RejectedExecutionException
 
 @RestController
 class APIController {
@@ -59,19 +55,16 @@ class APIController {
     }
 
     @PostMapping("/orders/{orderId}/payment")
-    fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): ResponseEntity<PaymentSubmissionDto> {
+    fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
         val paymentId = UUID.randomUUID()
-        val order = orderRepository.findById(orderId)
-            ?: throw IllegalArgumentException("No such order $orderId")
+        val order = orderRepository.findById(orderId)?.let {
+            orderRepository.save(it.copy(status = OrderStatus.PAYMENT_IN_PROGRESS))
+            it
+        } ?: throw IllegalArgumentException("No such order $orderId")
 
-        return try {
-            val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
-            ResponseEntity.ok(PaymentSubmissionDto(createdAt, paymentId))
-        } catch (e: RejectedExecutionException) {
-            ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
-                .header(HttpHeaders.RETRY_AFTER, "1")
-                .build<PaymentSubmissionDto>()
-        }
+
+        val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
+        return PaymentSubmissionDto(createdAt, paymentId)
     }
 
     class PaymentSubmissionDto(
