@@ -66,7 +66,7 @@ class PaymentExternalSystemAdapterImpl(
         try {
             inflightLimiter.acquire()
 
-            while (!rateLimiter.tick()) { }
+            rateLimiter.tickBlocking()
 
             val request = Request.Builder().run {
                 url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
