@@ -19,7 +19,7 @@ class OrderPayer {
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
         private const val QUEUE_CAPACITY = 1
-        private const val WORKER_COUNT = 128
+        private const val WORKER_COUNT = 110
         private const val RETRY_AFTER_DELAY_MS = 500L
     }
 
