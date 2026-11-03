@@ -52,12 +52,7 @@ class OrderPayer {
     )
 
     @Synchronized
-    fun processPayment(
-        orderId: UUID,
-        amount: Int,
-        paymentId: UUID,
-        deadline: Long,
-    ): Long {
+    fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (queue.size >= QUEUE_CAPACITY) {
             throw PaymentQueueFullException(
                 retryAfter = System.currentTimeMillis() + RETRY_AFTER_DELAY_MS
