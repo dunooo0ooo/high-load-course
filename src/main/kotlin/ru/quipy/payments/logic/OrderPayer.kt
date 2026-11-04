@@ -5,9 +5,11 @@ import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
 import ru.quipy.common.utils.CallerBlockingRejectedExecutionHandler
+import ru.quipy.common.utils.LeakingBucketRateLimiter
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import java.time.Duration
 import java.util.*
 import java.util.concurrent.PriorityBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
@@ -18,8 +20,10 @@ class OrderPayer {
 
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
-        private const val QUEUE_CAPACITY = 1
-        private const val WORKER_COUNT = 110
+        private const val INPUT_RATE_LIMIT_PER_SEC = 11L
+        private const val INPUT_BUCKET_CAPACITY = 264
+        private const val QUEUE_CAPACITY = 253
+        private const val WORKER_COUNT = 14
         private const val RETRY_AFTER_DELAY_MS = 500L
     }
 
@@ -33,6 +37,12 @@ class OrderPayer {
 
     @Autowired
     private lateinit var paymentService: PaymentService
+
+    private val inputRateLimiter = LeakingBucketRateLimiter(
+        rate = INPUT_RATE_LIMIT_PER_SEC,
+        window = Duration.ofSeconds(1),
+        bucketSize = INPUT_BUCKET_CAPACITY,
+    )
 
     private val queue = PriorityBlockingQueue<Runnable>(QUEUE_CAPACITY)
 
@@ -49,6 +59,11 @@ class OrderPayer {
     @Synchronized
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (queue.size >= QUEUE_CAPACITY) {
+            throw PaymentQueueFullException(
+                retryAfter = System.currentTimeMillis() + RETRY_AFTER_DELAY_MS
+            )
+        }
+        if (!inputRateLimiter.tick()) {
             throw PaymentQueueFullException(
                 retryAfter = System.currentTimeMillis() + RETRY_AFTER_DELAY_MS
             )
