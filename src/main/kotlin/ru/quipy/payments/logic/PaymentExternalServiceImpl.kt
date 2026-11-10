@@ -19,6 +19,7 @@ import java.util.*
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
+    private val paymentMetrics: PaymentMetrics,
     private val paymentProviderHostPort: String,
     private val token: String,
 ) : PaymentExternalSystemAdapter {
@@ -83,6 +84,17 @@ class PaymentExternalSystemAdapterImpl(
 
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
+                if (!body.result) {
+                    paymentMetrics.recordClientError(
+                        accountName,
+                        when (body.message) {
+                            "Temporary error" -> "temporary_error"
+                            null -> "unknown"
+                            else -> "provider_error"
+                        }
+                    )
+                }
+
                 // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
                 // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
                 paymentESService.update(paymentId) {
@@ -92,6 +104,7 @@ class PaymentExternalSystemAdapterImpl(
         } catch (e: Exception) {
             when (e) {
                 is SocketTimeoutException -> {
+                    paymentMetrics.recordClientError(accountName, "timeout")
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
@@ -99,6 +112,7 @@ class PaymentExternalSystemAdapterImpl(
                 }
 
                 else -> {
+                    paymentMetrics.recordClientError(accountName, "exception")
                     logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
 
                     paymentESService.update(paymentId) {
