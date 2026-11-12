@@ -1,15 +1,17 @@
 package ru.quipy.payments.logic
 
+import jakarta.annotation.PostConstruct
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
-import ru.quipy.common.utils.CallerBlockingRejectedExecutionHandler
+import ru.quipy.apigateway.APIController.OrderStatus
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.core.EventSourcingService
+import ru.quipy.orders.repository.OrderRepository
 import ru.quipy.payments.api.PaymentAggregate
 import java.util.*
-import java.util.concurrent.PriorityBlockingQueue
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
@@ -18,13 +20,6 @@ class OrderPayer {
 
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
-        private const val QUEUE_CAPACITY = 42
-        private const val WORKER_COUNT = 5
-    }
-
-    private class PaymentTask(val deadline: Long, private val action: () -> Unit) : Runnable, Comparable<PaymentTask> {
-        override fun run() = action()
-        override fun compareTo(other: PaymentTask): Int = deadline.compareTo(other.deadline)
     }
 
     @Autowired
@@ -33,25 +28,35 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    private val queue = PriorityBlockingQueue<Runnable>(QUEUE_CAPACITY)
+    @Autowired
+    private lateinit var paymentMetrics: PaymentMetrics
+
+    @Autowired
+    private lateinit var orderRepository: OrderRepository
 
     private val paymentExecutor = ThreadPoolExecutor(
-        WORKER_COUNT,
-        WORKER_COUNT,
+        128,
+        128,
         0L,
         TimeUnit.MILLISECONDS,
-        queue,
+        LinkedBlockingQueue(8),
         NamedThreadFactory("payment-submission-executor"),
-        CallerBlockingRejectedExecutionHandler()
+        ThreadPoolExecutor.AbortPolicy()
     )
 
-    @Synchronized
+    @PostConstruct
+    fun registerMetrics() {
+        paymentMetrics.monitorQueue(paymentExecutor)
+    }
+
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
-        if (queue.size >= QUEUE_CAPACITY) {
-            throw PaymentQueueFullException()
-        }
+        paymentMetrics.recordIncoming()
         val createdAt = System.currentTimeMillis()
-        paymentExecutor.execute(PaymentTask(deadline) {
+        paymentExecutor.submit {
+            val order = orderRepository.findById(orderId)
+                ?: throw IllegalArgumentException("No such order $orderId")
+            orderRepository.save(order.copy(status = OrderStatus.PAYMENT_IN_PROGRESS))
+
             val createdEvent = paymentESService.create {
                 it.create(
                     paymentId,
@@ -62,7 +67,7 @@ class OrderPayer {
             logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
 
             paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
-        })
+        }
         return createdAt
     }
 }
