@@ -13,6 +13,7 @@ import ru.quipy.payments.api.PaymentAggregate
 import java.io.InterruptedIOException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.TimeUnit
 
 
 // Advice: always treat time as a Duration
@@ -25,6 +26,7 @@ class PaymentExternalSystemAdapterImpl(
 ) : PaymentExternalSystemAdapter {
 
     companion object {
+        private const val RESPONSE_GRACE_MILLIS = 200L
         private const val TEMPORARY_ERROR = "Temporary error"
 
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
@@ -40,7 +42,11 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val client = OkHttpClient.Builder().build()
+    private val attemptTimeoutMillis = (minimumRequestBudgetMillis * 3 / 2).coerceAtLeast(1L)
+    private val client = OkHttpClient.Builder()
+        .retryOnConnectionFailure(false) // Handle HTTP 408 in the payment retry loop.
+        .eventListenerFactory(paymentMetrics.attemptLatency(accountName))
+        .build()
     private val retryDelaysMillis = longArrayOf(25L, 75L)
 
     private var rateLimiter: SlidingWindowRateLimiter
@@ -60,38 +66,32 @@ class PaymentExternalSystemAdapterImpl(
 
         val transactionId = UUID.randomUUID()
 
-        fun tooLate(submitted: Boolean) =
-            rejectIfTooLate(paymentId, paymentStartedAt, deadline, transactionId, submitted)
+        fun tooLate(submitted: Boolean, checkedAt: Long = now()) =
+            rejectIfTooLate(paymentId, paymentStartedAt, deadline, transactionId, submitted, checkedAt)
 
         try {
             for (attempt in 0..retryDelaysMillis.size) {
                 val firstAttempt = attempt == 0
                 if (tooLate(submitted = !firstAttempt)) return
 
-                val body = withRequestSlot {
-                    if (tooLate(submitted = !firstAttempt)) return
+                val result = withRequestSlot {
                     if (firstAttempt) {
+                        if (tooLate(submitted = false)) return
                         recordSubmission(paymentId, transactionId, paymentStartedAt)
-                        if (tooLate(submitted = true)) return
                     }
-                    requestPayment(paymentId, transactionId, amount, deadline)
+                    val checkedAt = now()
+                    if (tooLate(submitted = true, checkedAt = checkedAt)) return
+                    requestPayment(paymentId, transactionId, amount, deadline - checkedAt, attempt)
                 } ?: return
 
-                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, attempt=${attempt + 1}")
-                recordProviderError(body)
-                if (body.result || body.message != TEMPORARY_ERROR || attempt == retryDelaysMillis.size) {
+                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${result.success}, message: ${result.message}, attempt=${attempt + 1}")
+                if (!result.retryable || attempt == retryDelaysMillis.size) {
                     paymentESService.update(paymentId) {
-                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                        it.logProcessing(result.success, now(), transactionId, reason = result.message)
                     }
                     return
                 }
                 Thread.sleep(retryDelaysMillis[attempt])
-            }
-        } catch (e: InterruptedIOException) {
-            paymentMetrics.recordClientError(accountName, "timeout")
-            logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-            paymentESService.update(paymentId) {
-                it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
             }
         } catch (e: Exception) {
             paymentMetrics.recordClientError(accountName, "exception")
@@ -119,25 +119,46 @@ class PaymentExternalSystemAdapterImpl(
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
     }
 
-    private fun requestPayment(paymentId: UUID, transactionId: UUID, amount: Int, deadline: Long): ExternalSysResponse? {
-        val timeoutMillis = (deadline - now()).coerceAtLeast(1L)
+    private data class AttemptResult(val success: Boolean, val message: String?, val retryable: Boolean)
+
+    private fun requestPayment(
+        paymentId: UUID,
+        transactionId: UUID,
+        amount: Int,
+        remainingMillis: Long,
+        attempt: Int,
+    ): AttemptResult? {
+        val providerMillis = minOf(attemptTimeoutMillis, remainingMillis - RESPONSE_GRACE_MILLIS)
+        val timeout = Duration.ofMillis(providerMillis)
         val request = Request.Builder()
-            .url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
+            .url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount&timeout=$timeout")
             .post(emptyBody)
             .build()
+        val call = client.newCall(request)
+        call.timeout().timeout(providerMillis + RESPONSE_GRACE_MILLIS, TimeUnit.MILLISECONDS)
+        if (attempt > 0) paymentMetrics.recordRetry(accountName)
 
-        return client.newBuilder()
-            .callTimeout(Duration.ofMillis(timeoutMillis))
-            .build()
-            .newCall(request).execute().use { response ->
+        try {
+            return call.execute().use { response ->
+                if (response.code == 408) return timeoutResult("Provider timeout.")
                 val responseText = response.body?.string()
-                try {
+                val body = try {
                     mapper.readValue(responseText, ExternalSysResponse::class.java)
                 } catch (e: Exception) {
                     logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: $responseText", e)
                     ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-                }
+                } ?: return null
+                recordProviderError(body)
+                AttemptResult(body.result, body.message, !body.result && body.message == TEMPORARY_ERROR)
             }
+        } catch (e: InterruptedIOException) {
+            return timeoutResult("Request timeout.")
+        }
+    }
+
+    private fun timeoutResult(reason: String): AttemptResult {
+        paymentMetrics.recordTimeout(accountName)
+        return AttemptResult(false, reason, retryable = true)
     }
 
     private fun recordProviderError(body: ExternalSysResponse) {
@@ -156,9 +177,9 @@ class PaymentExternalSystemAdapterImpl(
         deadline: Long,
         transactionId: UUID,
         submissionAlreadyRecorded: Boolean,
+        checkedAt: Long,
     ): Boolean {
-        val checkedAt = now()
-        if (deadline - checkedAt > minimumRequestBudgetMillis) {
+        if (deadline - checkedAt > maxOf(minimumRequestBudgetMillis, RESPONSE_GRACE_MILLIS)) {
             return false
         }
 
