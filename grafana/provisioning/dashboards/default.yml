@@ -7,3 +7,8 @@ providers:
     options:
       path:
         /etc/grafana/provisioning/dashboards/ServicesStatistic.json
+  - name: Payment errors
+    folder: bombardier
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards/PaymentClientErrors.json
