@@ -18,8 +18,9 @@ class OrderPayer {
 
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
-        private const val QUEUE_CAPACITY = 42
-        private const val WORKER_COUNT = 5
+        private const val QUEUE_CAPACITY = 1
+        private const val WORKER_COUNT = 110
+        private const val RETRY_AFTER_DELAY_MS = 500L
     }
 
     private class PaymentTask(val deadline: Long, private val action: () -> Unit) : Runnable, Comparable<PaymentTask> {
@@ -48,7 +49,9 @@ class OrderPayer {
     @Synchronized
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (queue.size >= QUEUE_CAPACITY) {
-            throw PaymentQueueFullException()
+            throw PaymentQueueFullException(
+                retryAfter = System.currentTimeMillis() + RETRY_AFTER_DELAY_MS
+            )
         }
         val createdAt = System.currentTimeMillis()
         paymentExecutor.execute(PaymentTask(deadline) {

@@ -1,3 +1,5 @@
 package ru.quipy.payments.logic
 
-class PaymentQueueFullException : RuntimeException("Payment queue is full")
+class PaymentQueueFullException(
+    val retryAfter: Long
+) : RuntimeException("Payment queue is full")
