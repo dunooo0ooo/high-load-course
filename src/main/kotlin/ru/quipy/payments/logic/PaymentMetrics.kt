@@ -20,6 +20,17 @@ class PaymentMetrics(meterRegistry: MeterRegistry) {
         processingDuration.record(milliseconds.coerceAtLeast(0).toDouble() / 1000.0)
     }
 
+    internal fun attemptLatency(account: String) = PaymentAttemptLatency(account, registry)
+
+    fun recordRetry(account: String) {
+        registry.counter("payment.retries", "account", account).increment()
+    }
+
+    fun recordTimeout(account: String) {
+        registry.counter("payment.attempt.timeouts", "account", account).increment()
+        recordClientError(account, "timeout")
+    }
+
     fun recordClientError(account: String, reason: String) {
         Counter.builder("payment.client.errors")
             .description("Payment errors returned by the external payment client")

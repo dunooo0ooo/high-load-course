@@ -1,0 +1,71 @@
+{
+  "uid": "payment-client-attempts",
+  "title": "Попытки оплаты",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Повторные HTTP-вызовы с запуска сервиса",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "payment_retries_total",
+          "legendFormat": "{{account}}"
+        }
+      ],
+      "description": "Каждый повторный HTTP-вызов увеличивает счётчик на один. Первая попытка оплаты не учитывается. Счётчик начинается заново при перезапуске приложения."
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Длительность одной попытки оплаты",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "payment_attempt_duration_seconds{quantile=~\"0[.]85|0[.]9|0[.]99\"}",
+          "legendFormat": "{{account}} · {{outcome}} · q={{quantile}}"
+        }
+      ],
+      "description": "p85, p90 и p99 по аккаунту и исходу HTTP-вызова. Сравните длительность полученных ответов (response) с попытками, завершившимися таймаутом провайдера или клиента."
+    }
+  ]
+}
